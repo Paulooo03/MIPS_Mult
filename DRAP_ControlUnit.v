@@ -1,128 +1,65 @@
-module DRAP_ControlUnit_Multi (
-    input clk,
-    input rst,
+module DRAP_ControlUnit(
     input [5:0] opcode,
-    input [5:0] funct,
+    input [5:0] funct,      
     
-    // Core Datapath Control Signals
-    output reg PCWrite,
-    output reg IRWrite,
-    output reg RegWrite,
-    output reg memRead,
-    output reg memWrite,
-    output reg ALUSrc,
-    output reg RegDst,
-    output reg memtoReg,
+    output reg RegDst, ALUSrc, memtoReg, RegWrite, memRead, memWrite, Branch, Jump,
+    output reg sel1, sel0, cin, binv,
+    output reg BranchNotEqual, JumpReg, JumpAndLink,
     
-    // Flow Control & Custom Datapath Signals
-    output reg Branch,
-    output reg Jump,
-    output reg BranchNotEqual,
-    output reg JumpReg,
-    output reg JumpAndLink,
+    // NEW SIGNALS FOR MULT/DIV
+    output reg mult_en,
+    output reg div_en,
     output reg mfhi,
     output reg mflo
 );
 
-    // FSM States
-    parameter FETCH    = 2'b00;
-    parameter DECODE   = 2'b01;
-    parameter EXECUTE  = 2'b10;
-    parameter MEM_WB   = 2'b11;
-
-    reg [1:0] current_state, next_state;
-
-    // State Transition Register
-    always @(posedge clk or posedge rst) begin
-        if (rst) current_state <= FETCH;
-        else current_state <= next_state;
-    end
-
-    // Next State Logic
     always @(*) begin
-        case (current_state)
-            FETCH:   next_state = DECODE;
-            DECODE:  next_state = EXECUTE;
-            EXECUTE: begin
-                // Jumps, Branches, MULT, and DIV finish in the Execute stage.
-                // Standard math (ADDI, ANDI, ORI) and MFLO need a Writeback stage.
-                if (opcode == 6'h05 || opcode == 6'h03 || (opcode == 6'h00 && (funct == 6'h08 || funct == 6'h18 || funct == 6'h1A)))
-                    next_state = FETCH;
-                else
-                    next_state = MEM_WB;
-            end
-            MEM_WB:  next_state = FETCH;
-            default: next_state = FETCH;
-        endcase
-    end
+        // Default to 0
+        RegDst = 0; ALUSrc = 0; memtoReg = 0; RegWrite = 0; 
+        memRead = 0; memWrite = 0; Branch = 0; Jump = 0;
+        sel1 = 0; sel0 = 0; cin = 0; binv = 0;
+        BranchNotEqual = 0; JumpReg = 0; JumpAndLink = 0;
+        mult_en = 0; div_en = 0; mfhi = 0; mflo = 0;
 
-    // Output Logic (Moore/Mealy)
-    always @(*) begin
-        // 1. Default all signals to 0 to prevent accidental writes or latches
-        PCWrite = 0; IRWrite = 0; RegWrite = 0;
-        memRead = 0; memWrite = 0; ALUSrc = 0; RegDst = 0; memtoReg = 0;
-        Branch = 0; Jump = 0; BranchNotEqual = 0; JumpReg = 0; JumpAndLink = 0;
-        mfhi = 0; mflo = 0;
-
-        // 2. Drive signals based on current FSM state
-        case (current_state)
-            FETCH: begin
-                IRWrite = 1; // Latch the instruction from memory
-                // Note: We DO NOT update PC here in your architecture, otherwise 
-                // the branch target adders in your IFetch module will calculate wrong!
-            end
-
-            DECODE: begin
-                // Wait state: A and B registers automatically latch RegData1 & 2
-            end
-
-            EXECUTE: begin
-                // Set ALUSrc for standard instructions
-                if (opcode != 6'h00) ALUSrc = 1; // I-Type (Immediate)
-                else ALUSrc = 0;                 // R-Type
-
-                // Process Branch/Jump instructions (They finish in this state)
-                case (opcode)
-                    6'h05: begin // BNE
-                        BranchNotEqual = 1; Branch = 1;
-                        PCWrite = 1; // Update PC with branch target or PC+4
+        case (opcode)
+            // R-TYPE INSTRUCTIONS (opcode == 0)
+            6'b000000: begin
+                case (funct)
+                    6'b001000: JumpReg = 1; 
+                    6'b011000: mult_en = 1; // mult
+                    6'b011010: div_en = 1;  // div
+                    6'b010000: begin        // mfhi
+                        mfhi = 1;
+                        RegWrite = 1;
+                        RegDst = 1; // R-type writes to $rd
                     end
-                    6'h03: begin // JAL
-                        JumpAndLink = 1; Jump = 1; RegWrite = 1;
-                        PCWrite = 1; // Update PC with jump target
+                    6'b010010: begin        // mflo
+                        mflo = 1;
+                        RegWrite = 1;
+                        RegDst = 1; // R-type writes to $rd
                     end
-                    6'h00: begin
-                        if (funct == 6'h08) begin // JR
-                            JumpReg = 1; 
-                            PCWrite = 1; // Update PC with $rs
-                        end
-                        else if (funct == 6'h18 || funct == 6'h1A) begin // MULT / DIV
-                            PCWrite = 1; // MULT/DIV modules write internally, just advance PC
-                        end
-                    end
-                    default: ; // Do nothing for others
+                    default: ; 
                 endcase
             end
 
-            MEM_WB: begin
-                // All instructions that reach this state just need to advance PC by 4
-                PCWrite = 1; 
-
-                case (opcode)
-                    6'h08, 6'h0C, 6'h0D: begin // ADDI, ANDI, ORI
-                        RegWrite = 1; 
-                        RegDst = 0; // Write to rt
-                    end
-                    6'h00: begin
-                        if (funct == 6'h12) begin // MFLO
-                            mflo = 1; 
-                            RegWrite = 1; 
-                            RegDst = 1; // Write to rd
-                        end
-                    end
-                    default: ; // Do nothing
-                endcase
+            // I-TYPE INSTRUCTIONS
+            6'b001000: begin // addi 
+                ALUSrc = 1; RegWrite = 1; sel1 = 1; sel0 = 0; cin = 0; binv = 0;
             end
+            6'b001100: begin // andi
+                ALUSrc = 1; RegWrite = 1; sel1 = 0; sel0 = 0; cin = 0; binv = 0;
+            end
+            6'b001101: begin // ori
+                ALUSrc = 1; RegWrite = 1; sel1 = 0; sel0 = 1; cin = 0; binv = 0;
+            end
+            6'b000101: begin // bne
+                Branch = 1; BranchNotEqual = 1; sel1 = 1; sel0 = 0; cin = 1; binv = 1;
+            end
+            // J-TYPE INSTRUCTIONS
+            6'b000011: begin // jal
+                Jump = 1; JumpAndLink = 1; RegWrite = 1;
+            end
+            default: ; 
         endcase
     end
 endmodule

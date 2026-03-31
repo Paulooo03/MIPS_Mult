@@ -123,13 +123,7 @@ module DRAP_datapath(
     output [31:0] PC_out, instr, d_memory,
     output co, zflag, ovr
 );
-wire [31:0] IR_out;     // Output of Instruction Register
-wire [31:0] A_out;      // Output of A Register
-wire [31:0] B_out;      // Output of B Register
-wire [31:0] ALUOut_out; // Output of ALUOut Register
-wire [31:0] MDR_out;    // Output of Memory Data Register
 
-wire PCWrite, IRWrite;  // New control signals
 wire z;
 wire [31:0] pcout;
 wire [4:0] wr_addr, normal_wr_addr;
@@ -145,46 +139,29 @@ wire mult_en, div_en, mfhi, mflo;
 wire [31:0] hi_out, lo_out;
 
 // --- CONTROL UNIT ---
-DRAP_ControlUnit_Multi CU (
-    .clk(clk), .rst(rst),
-    .opcode(IR_out[31:26]), .funct(IR_out[5:0]),
+DRAP_ControlUnit CU (
+    .opcode(instruction[31:26]), .funct(instruction[5:0]),
     .RegDst(RegDst), .ALUSrc(ALUSrc), .memtoReg(memtoReg), .RegWrite(RegWrite),
     .memRead(memRead), .memWrite(memWrite), .Branch(Branch), .Jump(Jump),
-    .PCWrite(PCWrite), .IRWrite(IRWrite),
-    .BranchNotEqual(BranchNotEqual), .JumpReg(JumpReg), .JumpAndLink(JumpAndLink)
-    // Note: sel1, sel0, cin, binv, mult_en, div_en are moved to the ALU Controller
+    .sel1(sel1), .sel0(sel0), .cin(cin), .binv(binv),
+    .BranchNotEqual(BranchNotEqual), .JumpReg(JumpReg), .JumpAndLink(JumpAndLink),
+    .mult_en(mult_en), .div_en(div_en), .mfhi(mfhi), .mflo(mflo) // NEW PORTS
 );
-
-// 1. Instruction Register (IR)
-// Grabs instruction from memory only during FETCH state
-DRAP_StageReg IR_reg (
-    .clk(clk), .rst(rst), .en(IRWrite), 
-    .d(instruction), // from IROM
-    .q(IR_out)       // Feeds into Control Unit, RegFile, etc.
-);
-
-// 2. A and B Registers
-// Constantly grabs data from RegFile on every clock
-DRAP_StageReg A_reg (.clk(clk), .rst(rst), .en(1'b1), .d(regData1), .q(A_out));
-DRAP_StageReg B_reg (.clk(clk), .rst(rst), .en(1'b1), .d(regData2), .q(B_out));
-
-// 3. ALUOut Register
-// Grabs ALU result at the end of EXECUTE state
-DRAP_StageReg ALUOut_reg (.clk(clk), .rst(rst), .en(1'b1), .d(aluData), .q(ALUOut_out));
-
-// 4. Memory Data Register (MDR)
-// Grabs Data Memory output at the end of MEM state
-DRAP_StageReg MDR_reg (.clk(clk), .rst(rst), .en(1'b1), .d(dmemory), .q(MDR_out));
 
 // --- UPDATED IFETCH INSTANTIATION ---
 DRAP_Ifetch M1 (
-    .PC_out(pcout), .pcplus4_out(pcplus4_out), 
+    .PC_out(pcout),
+    .pcplus4_out(pcplus4_out),    // Outputs PC+4 for JAL
     .sign_ext_in(sign_extend[29:0]), 
-    .instruction(instruction[25:0]), // This one stays raw instruction directly from ROM
-    .rs_val(A_out),                  // Changed to A_out
-    .Br_in(Branch), .Zero_in(z), .jmp(Jump), .rst(rst), .clk(clk),
-    .BranchNotEqual(BranchNotEqual), .JumpReg(JumpReg),
-    .PCWrite(PCWrite)                // <--- NEW: Hooked up to CU
+    .instruction(instruction[25:0]),
+    .rs_val(regData1),            // Inputs $rs for JR
+    .Br_in(Branch), 
+    .Zero_in(z), 
+    .jmp(Jump), 
+    .rst(rst), 
+    .clk(clk),
+    .BranchNotEqual(BranchNotEqual), // Control for BNE
+    .JumpReg(JumpReg)                // Control for JR
 );
 
 DRAP_Irom M3 (
@@ -194,18 +171,21 @@ DRAP_Irom M3 (
 );
 
 DRAP_regFile M4 (
-    .clk(clk), .rst(rst), .wr_en(RegWrite), 
-    .r_addr1(IR_out[25:21]), // Changed to IR_out
-    .r_addr2(IR_out[20:16]), // Changed to IR_out
-    .w_addr(wr_addr), 
-    .w_data(regWriteData), 
-    .r_data1(regData1), .r_data2(regData2)
+    .clk(clk), 
+    .rst(rst), 
+    .wr_en(RegWrite), 
+    .r_addr1(instruction[25:21]), 
+    .r_addr2(instruction[20:16]), 
+    .w_addr(wr_addr),             // Now driven by JAL mux
+    .w_data(regWriteData),        // Now driven by JAL mux
+    .r_data1(regData1), 
+    .r_data2(regData2)
 );
 
 mux5bit_2to1 M5 (
     .muxout(normal_wr_addr), 
-    .op0(IR_out[20:16]),     // Changed to IR_out
-    .op1(IR_out[15:11]),     // Changed to IR_out
+    .op0(instruction[20:16]), 
+    .op1(instruction[15:11]), 
     .sel(RegDst)
 );
 
@@ -216,44 +196,38 @@ assign wr_addr = JumpAndLink ? 5'd31 : normal_wr_addr;
 
 MUX32BIT_2TO1 M6 (
     .out(alu_in2), 
-    .in0(B_out), 
+    .in0(regData2), 
     .in1(sign_extend), 
     .sel(ALUSrc)
 );
 
 DRAP_sign_xtnd M7 (
     .signExtend(sign_extend), 
-    .instr(IR_out[15:0])
+    .instr(instruction[15:0])
 );
 
 DRAP_ALU M8 (
     .result(aluData), .co(co), .zero(z), .ovr(ovr), 
-    .a(A_out), .b(alu_in2), .cin(cin), .binv(binv), .sel1(sel1), .sel0(sel0)
+    .a(regData1), .b(alu_in2), .cin(cin), .binv(binv), .sel1(sel1), .sel0(sel0)
 );
 
 DRAP_MultDiv M_MultDiv (
     .clk(clk), .rst(rst),
-    .a(A_out), .b(B_out),
+    .a(regData1), .b(regData2),
     .mult_en(mult_en), .div_en(div_en),
     .hi(hi_out), .lo(lo_out)
 );
 
 DRAP_Dmemory M9 (
-    .data_out(dmemory), .data_in(B_out), .address(ALUOut_out[6:0]), // Changed to B_out and ALUOut_out
+    .data_out(dmemory), .data_in(regData2), .address(aluData[6:0]), 
     .clk(clk), .write(memWrite), .read(memRead)
 );
 
 MUX32BIT_2TO1 M10 (
     .out(normal_write_data), 
-    .in0(ALUOut_out),        // Changed to ALUOut_out
-    .in1(MDR_out),           // Changed to MDR_out
+    .in0(aluData), 
+    .in1(dmemory), 
     .sel(memtoReg)
-);
-
-DRAP_ALUControl ALU_Ctrl (
-    .opcode(IR_out[31:26]), .funct(IR_out[5:0]),
-    .sel1(sel1), .sel0(sel0), .binv(binv), .cin(cin),
-    .mult_en(mult_en), .div_en(div_en)
 );
 
 // --- NEW: JAL Write Data Mux ---
@@ -306,8 +280,7 @@ module DRAP_Ifetch(
     input [31:0] rs_val,       // NEW: Import regData1 for the JR instruction
     input Br_in, Zero_in, jmp, rst, clk,
     input BranchNotEqual,      // NEW: Control signal for BNE
-    input JumpReg,              // NEW: Control signal for JR
-    input PCWrite              // <--- NEW: Add this
+    input JumpReg              // NEW: Control signal for JR
 );
 
 wire [31:0] pcout, pcplus4, shl2, cond_br, jmp_addr;
@@ -317,8 +290,7 @@ wire w1, actual_zero;
 assign PC_out = pcout;
 assign pcplus4_out = pcplus4; // Exporting PC+4 to the datapath
 
-// Change 1'b1 to PCWrite
-DRAP_PC M1(pcout, tmp2, PCWrite, rst, clk);
+DRAP_PC M1(pcout, tmp2, 1'b1, rst, clk);
 DRAP_IFETCH_ADDER M2(pcplus4, pcout, 32'h4);
 DRAP_shiftl2 M3(shl2, sign_ext_in[29:0]);
 DRAP_IFETCH_ADDER M4(cond_br, pcplus4, shl2);
@@ -339,48 +311,6 @@ Ifetch_mux1 M8(next_pc, tmp1, jmp_addr, jmp);
 // Selects between the normal next PC (branch/jump/PC+4) and the value inside $rs
 Ifetch_mux1 M9(tmp2, next_pc, rs_val, JumpReg);
 
-endmodule
-
-module DRAP_ALUControl (
-    input [5:0] opcode,
-    input [5:0] funct,
-    output reg sel1, sel0, binv, cin, mult_en, div_en
-);
-    always @(*) begin
-        sel1 = 0; sel0 = 0; binv = 0; cin = 0; mult_en = 0; div_en = 0;
-
-        case (opcode)
-            6'h00: begin // R-Type
-                case (funct)
-                    6'h18: mult_en = 1; // mult
-                    6'h1A: div_en = 1;  // div
-                    6'h2A: begin // slt (NEW!)
-                        sel1 = 1; sel0 = 1; binv = 1; cin = 1;
-                    end
-                endcase
-            end
-            6'h08: begin sel1 = 1; sel0 = 0; binv = 0; cin = 0; end // ADDI
-            6'h0C: begin sel1 = 0; sel0 = 0; binv = 0; cin = 0; end // ANDI
-            6'h0D: begin sel1 = 0; sel0 = 1; binv = 0; cin = 0; end // ORI
-            6'h05: begin sel1 = 1; sel0 = 0; binv = 1; cin = 1; end // BNE
-            default: ; 
-        endcase
-    end
-endmodule
-
-module DRAP_StageReg #(parameter WIDTH = 32) (
-    input clk,
-    input rst,
-    input en, // Enable signal (used mainly for the Instruction Register)
-    input [WIDTH-1:0] d,
-    output reg [WIDTH-1:0] q
-);
-    always @(posedge clk or posedge rst) begin
-        if (rst) 
-            q <= 0;
-        else if (en) 
-            q <= d;
-    end
 endmodule
 
 module DRAP_IFETCH_ADDER(sum, op1, op2);
@@ -410,45 +340,29 @@ module DRAP_Irom (
 );
 
     reg [6:0] addr;
-    always @(posedge clk) addr <= address;
+    
+    always @(posedge clk) begin
+        addr <= address;
+    end
 
+    // Instruction memory (Machine Code)
     always @(*) begin
         case (addr)
-            // 1. Load unsorted values
-            7'h00 : iROMdata = 32'h2001000F; // addi $1, $0, 15
-            7'h04 : iROMdata = 32'h20020008; // addi $2, $0, 8
-            7'h08 : iROMdata = 32'h20030002; // addi $3, $0, 2
-            
-            // 2. Compare $1 and $2
-            7'h0C : iROMdata = 32'h0022202A; // slt $4, $1, $2  ($4 = 1 if $1 < $2)
-            7'h10 : iROMdata = 32'h14800003; // bne $4, $0, 3   (Skip swap if already sorted)
-            
-            // 3. Swap $1 and $2 (uses $5 as temp)
-            7'h14 : iROMdata = 32'h20250000; // addi $5, $1, 0  (temp = $1)
-            7'h18 : iROMdata = 32'h20410000; // addi $1, $2, 0  ($1 = $2)
-            7'h1C : iROMdata = 32'h20A20000; // addi $2, $5, 0  ($2 = temp)
-            
-            // 4. Compare $2 and $3
-            7'h20 : iROMdata = 32'h0043202A; // slt $4, $2, $3
-            7'h24 : iROMdata = 32'h14800003; // bne $4, $0, 3
-            
-            // 5. Swap $2 and $3
-            7'h28 : iROMdata = 32'h20450000; // addi $5, $2, 0
-            7'h2C : iROMdata = 32'h20620000; // addi $2, $3, 0
-            7'h30 : iROMdata = 32'h20A30000; // addi $3, $5, 0
-            
-            // 6. Compare $1 and $2 AGAIN (because smallest bubbled down)
-            7'h34 : iROMdata = 32'h0022202A; // slt $4, $1, $2
-            7'h38 : iROMdata = 32'h14800003; // bne $4, $0, 3
-            
-            // 7. Swap $1 and $2
-            7'h3C : iROMdata = 32'h20250000; // addi $5, $1, 0
-            7'h40 : iROMdata = 32'h20410000; // addi $1, $2, 0
-            7'h44 : iROMdata = 32'h20A20000; // addi $2, $5, 0
-            
-            // 8. Halt
-            7'h48 : iROMdata = 32'h1400FFFF; // bne $0, $0, -1 (Infinite Loop)
-            
+            7'h00 : iROMdata = 32'h20010005; // addi $1, $0, 5
+            7'h04 : iROMdata = 32'h20020003; // addi $2, $0, 3
+            7'h08 : iROMdata = 32'h00220018; // mult $1, $2
+            7'h0C : iROMdata = 32'h00001812; // mflo $3
+            7'h10 : iROMdata = 32'h0062001A; // div  $3, $2
+            7'h14 : iROMdata = 32'h00002012; // mflo $4
+            7'h18 : iROMdata = 32'h3405000A; // ori  $5, $0, 10
+            7'h1C : iROMdata = 32'h30A60002; // andi $6, $5, 2
+            7'h20 : iROMdata = 32'h14860002; // bne  $4, $6, 2 (target)
+            7'h24 : iROMdata = 32'h20070063; // addi $7, $0, 99 (Skipped)
+            7'h28 : iROMdata = 32'h20080058; // addi $8, $0, 88 (Skipped)
+            7'h2C : iROMdata = 32'h0C00000D; // jal  func (address 0x34)
+            7'h30 : iROMdata = 32'h1400FFFF; // bne  $0, $0, 0 (Infinite loop)
+            7'h34 : iROMdata = 32'h200A002A; // addi $10, $0, 42
+            7'h38 : iROMdata = 32'h03E00008; // jr   $ra
             default: iROMdata = 32'h00000000; // NOP
         endcase
     end
@@ -651,19 +565,4 @@ module DRAP_MultDiv(
         end
     end
 
-endmodule
-
-module DRAP_StageReg #(parameter WIDTH = 32) (
-    input clk,
-    input rst,
-    input en, // Enable signal (used mainly for the Instruction Register)
-    input [WIDTH-1:0] d,
-    output reg [WIDTH-1:0] q
-);
-    always @(posedge clk or posedge rst) begin
-        if (rst) 
-            q <= 0;
-        else if (en) 
-            q <= d;
-    end
 endmodule
